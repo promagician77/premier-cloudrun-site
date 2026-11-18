@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>VisitCompanion on Cloud Run: deployment plan and drills</title>
+<meta name="description" content="A checked deployment plan for a Bun + Hono app on Cloud Run with Cloud SQL private IP, and the smoke, restore and password-rotation drills run before deployment.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/atkinson-hyperlegible-next-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+<header class="top">
+  <div class="wrap top-in">
+    <p class="mark">Cloud Run deployment plan for VisitCompanion</p>
+    <p class="by">Prepared by Santiago</p>
+  </div>
+  <nav class="wrap toc" aria-label="Sections">
+    <a href="#evidence">Rotation drill</a>
+    <a href="#plan">The plan</a>
+    <a href="#drills">Drills</a>
+    <a href="#runbook">Runbook</a>
+    <a href="#access">Access</a>
+    <a href="#measured">Measured</a>
+  </nav>
+</header>
+
+<main id="main" class="wrap">
+  <section class="hero" aria-labelledby="h1">
+    <h1 id="h1">VisitCompanion on Cloud Run, rehearsed before I touch your project.</h1>
+    <p class="lede">A deployment plan for your stack (Bun and Hono, Drizzle and PostgreSQL, Cloud Storage), with every gcloud command checked against the gcloud CLI's own help. The three things your checklist asks for (smoke tests, a backup-restore drill and the password routine) were run here first, on a stand-in app with the same stack and test data only.</p>
+    <aside class="callout" aria-labelledby="callout-h">
+      <h2 id="callout-h">One change I'd suggest to the guide: the domain</h2>
+      <p>Cloud Run's own domain mapping is a Preview feature, and Google's HIPAA guidance says not to use pre-GA offerings with PHI. The gcloud CLI agrees: for fully managed Cloud Run, mapping a domain needs the <code>gcloud beta</code> command group. The plan puts a global external Application Load Balancer with a Google-managed certificate in front instead, then closes the run.app address so the domain is the only way in.</p>
+    </aside>
+  </section>
+
+  <section class="band" id="evidence" aria-labelledby="evidence-h">
+    <h2 id="evidence-h">Rotating the database password under live traffic</h2>
+    <p class="section-lede" id="evidence-lede"></p>
+    <div class="chart" id="rot-chart" tabindex="0" role="region" aria-label="Rotation chart"></div>
+    <ul class="legend"><li><i class="sw ok"></i>Requests served</li><li><i class="sw bad"></i>Requests failed</li><li><i class="sw ev"></i>Step in the routine</li></ul>
+    <div class="tip" id="rot-tip" role="tooltip" hidden></div>
+    <details class="more">
+      <summary>Show the steps and timings</summary>
+      <div class="two" id="rot-steps"></div>
+    </details>
+  </section>
+
+  <section class="band" id="plan" aria-labelledby="plan-h">
+    <h2 id="plan-h">The deployment plan</h2>
+    <p class="section-lede">Change a setting and the commands and the checks update. The defaults are what I'd run; the other options are there to show what each check catches. Nothing here talks to Google Cloud.</p>
+    <div class="builder">
+      <form class="controls" id="controls" aria-label="Plan settings">
+        <fieldset>
+          <legend>Names</legend>
+          <label>Project ID <input name="project" value="premier-visitcompanion" spellcheck="false" autocomplete="off"></label>
+          <label>Region <select name="region"><option>us-east1</option><option>us-east4</option><option>us-east5</option><option>us-central1</option><option>us-south1</option></select></label>
+          <label>Domain <input name="domain" value="myvisitcompanion.com" spellcheck="false" autocomplete="off"></label>
+          <label>Service name <input name="service" value="visitcompanion" spellcheck="false" autocomplete="off"></label>
+        </fieldset>
+        <fieldset>
+          <legend>Choices</legend>
+          <div class="seg" role="radiogroup" aria-label="Custom domain"><span class="seg-l">Custom domain</span><label><input type="radio" name="domainMethod" value="lb" checked>Load balancer</label><label><input type="radio" name="domainMethod" value="mapping">Domain mapping</label></div>
+          <div class="seg" role="radiogroup" aria-label="Path to the database"><span class="seg-l">Path to the database</span><label><input type="radio" name="vpcMode" value="connector" checked>VPC connector</label><label><input type="radio" name="vpcMode" value="direct">Direct VPC egress</label></div>
+          <div class="seg" role="radiogroup" aria-label="Secret version"><span class="seg-l">Secret version</span><label><input type="radio" name="secretVersion" value="pinned" checked>Pinned</label><label><input type="radio" name="secretVersion" value="latest">latest</label></div>
+          <div class="seg" role="radiogroup" aria-label="App identity"><span class="seg-l">App runs as</span><label><input type="radio" name="runtimeIdentity" value="dedicated" checked>Its own account</label><label><input type="radio" name="runtimeIdentity" value="default">Default compute</label></div>
+          <div class="seg" role="radiogroup" aria-label="Ingress after launch"><span class="seg-l">After launch</span><label><input type="radio" name="ingress" value="internal-and-cloud-load-balancing" checked>Domain only</label><label><input type="radio" name="ingress" value="all">run.app open too</label></div>
+          <div class="seg" role="radiogroup" aria-label="My access"><span class="seg-l">My access</span><label><input type="radio" name="contractorAccess" value="expiring" checked>Expires</label><label><input type="radio" name="contractorAccess" value="standing">Standing</label></div>
+          <label class="tg"><input type="checkbox" name="dbPublicIp"> Give Cloud SQL a public IP</label>
+          <label class="tg"><input type="checkbox" name="sslAllow"> Allow unencrypted database connections</label>
+          <label class="tg"><input type="checkbox" name="pitr" checked> Point-in-time recovery</label>
+          <label class="tg"><input type="checkbox" name="deletionProtection" checked> Deletion protection</label>
+          <label class="tg"><input type="checkbox" name="bucketLockdown" checked> Lock the bucket down</label>
+          <label class="tg"><input type="checkbox" name="startupProbe" checked> Startup probe on /readyz</label>
+          <label class="tg"><input type="checkbox" name="twoUsers" checked> Two database logins</label>
+        </fieldset>
+      </form>
+      <div class="pre" aria-live="polite">
+        <p class="pre-sum" id="pre-sum"></p>
+        <ul class="checks" id="pre-list"></ul>
+      </div>
+    </div>
+    <div class="phase-head">
+      <h3 id="phases-h">Commands, in order</h3>
+      <button type="button" class="btn" id="dl-sh">Download deploy.sh</button>
+    </div>
+    <ol class="phases" id="phases" aria-labelledby="phases-h"></ol>
+  </section>
+
+  <section class="band" id="drills" aria-labelledby="drills-h">
+    <h2 id="drills-h">Drills, run before your access</h2>
+    <p class="section-lede" id="drills-lede"></p>
+    <h3>1. Smoke tests</h3>
+    <p id="smoke-lede"></p>
+    <div class="scroll" tabindex="0" role="region" aria-label="Smoke test results"><table class="data" id="smoke-table"></table></div>
+    <ul class="facts" id="smoke-facts"></ul>
+    <h3>2. Backup and point-in-time restore</h3>
+    <ol class="story" id="pitr-story"></ol>
+    <h3>3. Password rotation</h3>
+    <p id="rot-summary"></p>
+  </section>
+
+  <section class="band" id="runbook" aria-labelledby="runbook-h">
+    <h2 id="runbook-h">The runbook you keep</h2>
+    <p class="section-lede">Generated from the same names as the plan, so it stays true to what was built. The final version goes in your repository as Markdown.</p>
+    <div class="phase-head"><h3>Where everything lives</h3><button type="button" class="btn" id="dl-md">Download runbook.md</button></div>
+    <div class="scroll" tabindex="0" role="region" aria-label="Where everything lives"><table class="data" id="where"></table></div>
+    <div id="rb-sections"></div>
+  </section>
+
+  <section class="band" id="access" aria-labelledby="access-h">
+    <h2 id="access-h">The database password, and my access</h2>
+    <div class="two">
+      <div>
+        <h3>The password</h3>
+        <ul class="plain" id="pw-list"></ul>
+      </div>
+      <div>
+        <h3>My access</h3>
+        <ul class="plain" id="access-list"></ul>
+      </div>
+    </div>
+    <h3>Roles your admin grants me, each expiring</h3>
+    <div class="scroll" tabindex="0" role="region" aria-label="Roles"><table class="data" id="roles"></table></div>
+  </section>
+
+  <section class="band" id="measured" aria-labelledby="measured-h">
+    <div class="two">
+      <div><h2 id="measured-h">Measured</h2><ul id="measured-list"></ul></div>
+      <div><h2>Not measured</h2><ul id="not-measured-list"></ul></div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <p>Prepared by Santiago. Checked against Google Cloud's Cloud Run, Cloud SQL and HIPAA documentation and the gcloud CLI. The stand-in app, its data and the drills use synthetic test data only; no patient data and no Google Cloud project were involved.</p>
+  </footer>
+</main>
+<script type="module" src="app.mjs"></script>
+</body>
+</html>

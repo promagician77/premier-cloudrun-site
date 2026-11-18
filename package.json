@@ -1,0 +1,9 @@
+{
+  "name": "cloudrun-deploy-plan-site",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static demo: Cloud Run deployment plan, preflight checks, runbook and drill results. No build step.",
+  "scripts": {
+    "start": "node -e \"console.log('Static site: deploy this folder as-is, or serve it with any static server.')\""
+  }
+}
